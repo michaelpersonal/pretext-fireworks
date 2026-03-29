@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Gesture Fireworks · Live Text Flow</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500;600;700&family=Inter:wght@300;400;500&display=swap" rel="stylesheet" />
+
+  <!-- MediaPipe Hands (must be loaded before main.ts accesses window.Hands) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.min.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <!-- Hidden video for hand-tracking input -->
+  <video id="video" playsinline style="display:none"></video>
+
+  <!-- Layer 1 (bottom): Text that flows around fireworks -->
+  <div id="text-layer" aria-label="Flowing text"></div>
+
+  <!-- Layer 2: Full-screen fireworks + hand skeleton canvas -->
+  <canvas id="fireworks-canvas"></canvas>
+
+  <!-- Layer 3 (top): UI chrome -->
+  <header id="top-bar">
+    <div class="bar-left">
+      <span class="bar-title">Gesture Fireworks</span>
+      <span class="bar-dot">·</span>
+      <span class="bar-subtitle">Live Text Flow</span>
+    </div>
+    <div class="bar-center" id="hint-text">
+      Allow camera &nbsp;•&nbsp; Left pinch: rocket 🚀 &nbsp;•&nbsp; Right pinch: burst 💥
+    </div>
+    <div class="bar-right">
+      <button id="edit-btn" title="Edit text">Edit Text</button>
+      <span id="fps-counter" title="Frames per second">-- fps</span>
+    </div>
+  </header>
+
+  <!-- Text editor panel (hidden by default) -->
+  <div id="editor-panel" class="hidden">
+    <div class="editor-inner">
+      <h3>Edit Source Text</h3>
+      <p class="editor-note">Text re-flows in real time around the fireworks.</p>
+      <textarea id="text-input" spellcheck="false"></textarea>
+      <div class="editor-actions">
+        <button id="reset-btn">Reset to Constitution</button>
+        <button id="apply-btn" class="primary">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Start / permission screen -->
+  <div id="start-screen">
+    <div class="start-inner">
+      <div class="start-year">250 years · 1776 → 2026</div>
+      <h1 class="start-title">Gesture Fireworks</h1>
+      <p class="start-sub">Live text reflow meets hand-controlled fireworks</p>
+      <ul class="start-gestures">
+        <li><kbd>Left hand pinch</kbd> → launch rocket 🚀</li>
+        <li><kbd>Right hand pinch</kbd> → instant burst 💥</li>
+      </ul>
+      <button id="start-btn">Allow Camera &amp; Start</button>
+      <p class="start-note">Requires webcam. Works on mobile with front camera.</p>
+    </div>
+  </div>
+
+  <!-- Error overlay -->
+  <div id="error-screen" class="hidden">
+    <p id="error-msg">Camera access denied — please allow and refresh.</p>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

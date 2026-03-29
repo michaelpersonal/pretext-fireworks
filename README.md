@@ -2,6 +2,8 @@
 
 > Hand-controlled fireworks with real-time text reflow around active particles — celebrating 250 years of the US Constitution.
 
+![Constitution](public/constitution.jpg)
+
 ![Demo](https://img.shields.io/badge/demo-localhost%3A5173-orange) ![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue) ![Vite](https://img.shields.io/badge/Vite-5.2-purple)
 
 ## What is this?

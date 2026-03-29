@@ -20,33 +20,146 @@ html, body {
    LAYER STACK
    ============================================= */
 
-/* Layer 1: Text (beneath fireworks, visible through semi-transparent canvas) */
+/* Text layer sits ABOVE the canvas so it's always readable.
+   pretext reflow ensures no span is placed where particles are glowing —
+   the fireworks show through the gaps where text is absent. */
 #text-layer {
   position: fixed;
   inset: 0;
-  z-index: 1;
+  z-index: 3;
   /* pointer-events off by default; re-enabled on individual spans for selectability */
   pointer-events: none;
   overflow: hidden;
 }
 
-/* Individual text line spans (injected by JS) */
+/* ---- Open-book page panels ---- */
+#page-left, #page-right {
+  position: fixed;
+  top: 0; bottom: 0;
+  z-index: 2;          /* sits between canvas (2) and text spans (3) */
+  pointer-events: none;
+  /* aged parchment gradient */
+  background:
+    radial-gradient(ellipse at 50% 0%,   rgba(210,185,130,0.07) 0%, transparent 70%),
+    radial-gradient(ellipse at 50% 100%, rgba(160,120, 60,0.05) 0%, transparent 70%),
+    linear-gradient(to bottom, rgba(200,170,100,0.06) 0%, rgba(180,145,80,0.04) 100%);
+  border: 1px solid rgba(200,165,90,0.10);
+}
+/* Left page: hug left edge, right edge = center spine */
+#page-left  { left: 0; }
+/* Right page: hug right edge, left edge = center spine */
+#page-right { right: 0; }
+
+/* Spine shadow — thin gradient overlay along the center */
+#page-left::after {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0; right: 0;
+  width: 18px;
+  background: linear-gradient(to right, transparent, rgba(0,0,0,0.18));
+}
+#page-right::before {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 18px;
+  background: linear-gradient(to left, transparent, rgba(0,0,0,0.18));
+}
+
+/* Book title banner across the top (injected by JS) */
+#book-title {
+  position: fixed;
+  top: 52px;
+  left: 0; right: 0;
+  z-index: 4;
+  text-align: center;
+  pointer-events: none;
+}
+#book-title .title-main {
+  font-family: 'Cinzel', serif;
+  font-size: clamp(11px, 1.1vw, 15px);
+  font-weight: 600;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: rgba(215, 185, 110, 0.75);
+}
+#book-title .title-rule {
+  display: block;
+  height: 1px;
+  margin: 5px auto 0;
+  background: linear-gradient(
+    to right,
+    transparent, rgba(200,165,90,0.35) 20%,
+    rgba(200,165,90,0.55) 50%,
+    rgba(200,165,90,0.35) 80%,
+    transparent
+  );
+}
+
+/* "We the People" large decorative header */
+#we-the-people {
+  position: fixed;
+  top: 76px;
+  z-index: 4;
+  pointer-events: none;
+  text-align: center;
+}
+#we-the-people span {
+  font-family: 'Cinzel', serif;
+  font-size: clamp(28px, 4.5vw, 58px);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: rgba(235, 200, 110, 0.92);
+  text-shadow:
+    0 0 40px rgba(255, 190, 60, 0.25),
+    0 2px 4px rgba(0, 0, 0, 0.9);
+  line-height: 1;
+}
+
+/* Column rule: thin decorative line down the center spine */
+#column-rule {
+  position: fixed;
+  top: 100px; bottom: 40px;
+  z-index: 4;
+  width: 1px;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    rgba(200,165,90,0.3) 8%,
+    rgba(200,165,90,0.3) 92%,
+    transparent
+  );
+}
+
+/* Individual text line spans — old manuscript style */
 #text-layer span {
   position: absolute;
   display: block;
-  font-family: 'Caveat', cursive;
-  font-size: 22px;
-  font-weight: 500;
+  font-family: 'IM Fell English', serif;
+  font-size: 17px;
+  font-weight: 400;
   line-height: 1;
   white-space: nowrap;
-  color: rgba(230, 220, 200, 0.88);
+  color: rgba(225, 200, 150, 0.90);
   text-shadow:
-    0 0 12px rgba(255, 220, 150, 0.25),
-    0 1px 2px rgba(0, 0, 0, 0.8);
-  pointer-events: auto; /* text is selectable */
+    0 0 20px rgba(255, 200, 80, 0.12),
+    0 1px 2px rgba(0, 0, 0, 0.85);
+  pointer-events: auto;
   cursor: text;
   user-select: text;
   -webkit-user-select: text;
+}
+
+/* Drop-cap first span gets a larger decorative first letter via JS class */
+#text-layer span.drop-cap::first-letter {
+  font-family: 'Cinzel', serif;
+  font-size: 3.8em;
+  font-weight: 600;
+  float: left;
+  line-height: 0.75;
+  margin-right: 4px;
+  color: rgba(230, 195, 100, 0.92);
 }
 
 /* Layer 2: Fireworks canvas */

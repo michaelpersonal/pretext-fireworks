@@ -88,12 +88,22 @@ function rgba(rgb: RGB, a: number): string {
   return `rgba(${rgb.r},${rgb.g},${rgb.b},${a})`;
 }
 
+interface ExplosionEvent {
+  x: number;
+  y: number;
+  startTime: number;
+  maxRadius: number; // px — scales with charge
+}
+
 export class ParticleSystem {
   particles: Particle[] = [];
   private sparkles: Sparkle[] = [];
   private trails: TrailDot[] = [];
   rockets: Rocket[] = [];
   maxParticles = 2000;
+
+  /** Explosion events used for text occlusion (independent of particle positions) */
+  private explosionEvents: ExplosionEvent[] = [];
 
   // -----------------------------------------------------------------
   // Public API for gesture-fireworks compatibility
@@ -125,6 +135,14 @@ export class ParticleSystem {
   }
 
   createFirework(x: number, y: number, charge: number, customPalette?: string[]): void {
+    // Record a time-based occlusion event so text dramatically parts then refills.
+    // Max radius 200–320 px — large enough to clear ~12 lines on one page.
+    this.explosionEvents.push({
+      x, y,
+      startTime: Date.now(),
+      maxRadius: 200 + charge * 120,
+    });
+
     const palette = customPalette ?? PALETTES[Math.floor(Math.random() * PALETTES.length)];
     const mainCount = Math.floor(200 + charge * 200);
     const baseSpeed = 12 + charge * 15;
@@ -222,53 +240,76 @@ export class ParticleSystem {
   // -----------------------------------------------------------------
   // Pretext integration: export occlusion shapes for text reflow
   //
-  // Returns bounding rectangles of all "bright enough" particle clusters.
-  // These are passed to the text layout engine each frame so text lines
-  // automatically avoid positions occupied by live fireworks.
+  // Instead of the bounding box of all particles (which at peak explosion
+  // spans the entire screen and wipes all text), we track discrete explosion
+  // events and return one small rect per blast. Each rect:
+  //   • grows from 0 → maxRadius in the first 300ms (particles expanding)
+  //   • holds at maxRadius for 400ms (peak visibility)
+  //   • shrinks back to 0 over 500ms (particles fading)
   //
-  // Strategy:
-  //   1. Collect all particles with life > BRIGHTNESS_THRESHOLD (still visually bright).
-  //   2. Find their union bounding box (expanded by the particle's rendered glow radius).
-  //   3. Also include in-flight rocket positions.
-  //   4. Return as Rect[]. The text layout iterates these rects per-line.
+  // This gives text a smooth, localised gap around each explosion rather
+  // than a screen-wide blackout.
+  //
+  // In-flight rockets also contribute a small rect so text parts as they rise.
+  // -----------------------------------------------------------------
+  // -----------------------------------------------------------------
+  // Pretext integration: export occlusion shapes for text reflow
+  //
+  // Two kinds of shapes:
+  //
+  //  1. ROCKET WAKE — a tall narrow column that travels upward with each
+  //     ascending rocket. The column extends from the rocket's nose upward
+  //     by WAKE_AHEAD px so text starts parting *before* the rocket arrives.
+  //     This creates the dramatic effect of text splitting like a curtain as
+  //     the rocket rises in real time.
+  //
+  //  2. EXPLOSION CIRCLE — a time-based disc centered on each blast:
+  //       0 – 200 ms : grows rapidly from 0 → maxRadius (text leaps away)
+  //     200 – 700 ms : holds at maxRadius   (clear circular hole in text)
+  //     700 – 1400 ms: shrinks back to 0    (text flows smoothly back in)
+  //
+  //  maxRadius = 200–320 px depending on charge, so a full-charge blast
+  //  clears roughly 12–15 lines on one page — very visible.
   // -----------------------------------------------------------------
   getOcclusionRects(): Rect[] {
-    const BRIGHTNESS_THRESHOLD = 0.15; // particles below this life are too dim to care
-    const GLOW_MULTIPLIER = 3.5;       // radial gradient glow is size*2; add extra margin
+    const LIFETIME   = 1400; // ms
+    const now        = Date.now();
 
-    if (this.particles.length === 0 && this.rockets.length === 0) return [];
+    this.explosionEvents = this.explosionEvents.filter(e => now - e.startTime < LIFETIME);
 
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    let hasPoints = false;
+    const rects: Rect[] = [];
 
-    for (const p of this.particles) {
-      if (p.life < BRIGHTNESS_THRESHOLD) continue;
-      const r = p.size * GLOW_MULTIPLIER;
-      if (p.x - r < minX) minX = p.x - r;
-      if (p.y - r < minY) minY = p.y - r;
-      if (p.x + r > maxX) maxX = p.x + r;
-      if (p.y + r > maxY) maxY = p.y + r;
-      hasPoints = true;
+    // ── Explosion circles ──
+    for (const e of this.explosionEvents) {
+      const t = (now - e.startTime) / LIFETIME;
+      let r: number;
+      if      (t < 0.14) r = e.maxRadius * (t / 0.14);              // fast grow
+      else if (t < 0.50) r = e.maxRadius;                            // hold
+      else               r = e.maxRadius * (1 - (t - 0.50) / 0.50); // slow shrink
+
+      if (r < 8) continue;
+      rects.push({ x: e.x - r, y: e.y - r, width: r * 2, height: r * 2 });
     }
 
-    // Include rockets (they glow too)
+    // ── Rocket wakes ──
+    // As the rocket rises, a moving vertical column (~WAKE_W px wide) parts
+    // the text ahead of it. The column extends from well above the nose
+    // to the bottom of the viewport so text below also clears.
     for (const r of this.rockets) {
-      const rr = 30;
-      if (r.x - rr < minX) minX = r.x - rr;
-      if (r.y - rr < minY) minY = r.y - rr;
-      if (r.x + rr > maxX) maxX = r.x + rr;
-      if (r.y + rr > maxY) maxY = r.y + rr;
-      hasPoints = true;
+      if (r.phase !== 'ascending') continue;
+      const WAKE_W     = 90;              // column width (px)
+      const WAKE_AHEAD = 120;             // how far ahead of nose text parts
+      const wakeTop    = r.y - WAKE_AHEAD;
+      const wakeBot    = 2000;            // extends to bottom of any viewport
+      rects.push({
+        x:      r.x - WAKE_W / 2,
+        y:      wakeTop,
+        width:  WAKE_W,
+        height: wakeBot - wakeTop,
+      });
     }
 
-    if (!hasPoints) return [];
-
-    return [{
-      x: minX,
-      y: minY,
-      width: maxX - minX,
-      height: maxY - minY,
-    }];
+    return rects;
   }
 
   // -----------------------------------------------------------------

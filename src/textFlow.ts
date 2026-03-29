@@ -1,33 +1,30 @@
 /**
- * textFlow.ts — Real-time text reflow using @chenglou/pretext
+ * textFlow.ts — Real-time two-column book layout using @chenglou/pretext
  *
- * How it works (the "Chika demo" technique, applied to fireworks):
+ * Layout model:
+ *   The viewport is treated as an open book: two pages side by side with a
+ *   centre spine gutter. Text flows down the LEFT page, then continues onto
+ *   the RIGHT page — exactly like reading a physical book.
  *
- * 1.  PREPARE (once, when text changes):
- *     `prepareWithSegments(text, font)` pre-measures every word/grapheme via
- *     canvas measureText, returning cached segment widths. This is the slow
- *     part (~5–20ms for a long paragraph) but happens only on text change.
+ * How real-time reflow works:
  *
- * 2.  LAYOUT (every animation frame, ~0.5–2ms total):
- *     We iterate through vertical "line slots" top-to-bottom. For each Y row:
- *       a. Query the current set of obstacle rectangles (fireworks canvas + active
- *          particle clusters) to find the widest unoccluded horizontal span.
- *       b. Call `layoutNextLine(prepared, cursor, availableWidth)` to get the
- *          next chunk of text that fits in that span.
- *       c. Position the corresponding DOM <span> at (x, y) for that span.
- *       d. Advance the cursor (line.end) and move to the next row.
+ * 1. PREPARE (once per text change, ~5–20 ms):
+ *    `prepareWithSegments(text, font)` segments the text and measures every
+ *    word via canvas.measureText, building a cache of segment widths.
  *
- * 3.  RENDER:
- *     Text is rendered as absolutely-positioned DOM <span> elements (NOT on a
- *     canvas), so it remains **fully selectable and copyable** while still
- *     moving in real time around the fireworks.
+ * 2. LAYOUT (every frame, ~0.5–2 ms total):
+ *    For each column, we walk Y rows top → bottom. Per row we:
+ *      a. Compute the available width within that column, minus any explosion
+ *         occlusion rects that intersect this Y band at this column's X range.
+ *      b. Call `layoutNextLine(prepared, cursor, availableWidth)` — pure
+ *         arithmetic on the cached widths, no DOM access, ~0.003 ms/call.
+ *      c. Write the resulting text + x/y into a pre-allocated DOM <span>.
+ *      d. Advance the shared text cursor to `line.end` and move to next row.
+ *    After filling the left column the cursor continues into the right column.
  *
- * 4.  PERFORMANCE:
- *     - A fixed pool of MAX_SPANS spans is pre-created; no DOM allocation in the
- *       hot path, just textContent + style updates.
- *     - Layout is throttled to ~30 fps (every other animation frame) since the
- *       particle occlusion changes fast but exact per-pixel accuracy isn't needed.
- *     - Unused spans are hidden with display:none (not removed).
+ * 3. RENDER:
+ *    Text lives in absolutely-positioned DOM <span> elements so it stays
+ *    fully selectable and copyable while dynamically repositioning every frame.
  */
 
 import {
@@ -39,58 +36,81 @@ import {
 
 import type { Rect } from './particles';
 
-// -----------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------
+// ─── Layout constants ──────────────────────────────────────────────────────
 
-/** CSS font string must match the Google Fonts import and the Caveat weight */
-export const TEXT_FONT = '22px "Caveat", cursive';
+/** Must match the @font-face / Google Fonts import exactly */
+export const TEXT_FONT = '17px "IM Fell English", serif';
 
-/** Vertical line spacing (px) */
-const LINE_HEIGHT = 30;
+const LINE_HEIGHT  = 26;   // px between baselines
+const H_PAD        = 16;   // inner horizontal padding per column
+const MIN_COL_W    = 120;  // narrowest usable column (px)
+const PAGE_MARGIN  = 48;   // left / right outer page margin
+const GUTTER       = 72;   // centre spine gutter width
+const MARGIN_TOP   = 148;  // below top bar + book title banner + "We The People" header
+const MARGIN_BOTTOM = 44;  // above bottom edge
+const MAX_SPANS    = 400;
 
-/** Horizontal padding inside each available text segment */
-const H_PAD = 10;
+// ─── Column geometry ───────────────────────────────────────────────────────
 
-/** Minimum segment width worth placing text into */
-const MIN_SEG_WIDTH = 100;
-
-/** Pre-allocate this many span elements in the pool */
-const MAX_SPANS = 300;
-
-/** Top margin (below the UI bar) and bottom margin */
-const MARGIN_TOP = 58;
-const MARGIN_BOTTOM = 50;
-
-// -----------------------------------------------------------------------
-// Obstacle-aware line-width helpers
-// -----------------------------------------------------------------------
+interface Column { x: number; width: number }
 
 /**
- * Given a horizontal band [y, y+lineHeight] and a list of obstacle rects,
- * returns the set of unoccluded horizontal segments in [0, viewportWidth].
- *
- * These segments are the "slots" where a line of text can be placed.
+ * Returns the two column definitions for the current viewport.
+ * On narrow screens (mobile) falls back to a single column.
  */
-function availableSegments(
+export function getColumns(vw: number): Column[] {
+  if (vw < 640) {
+    // Single column on mobile
+    return [{ x: PAGE_MARGIN, width: vw - PAGE_MARGIN * 2 }];
+  }
+  const colW = (vw - PAGE_MARGIN * 2 - GUTTER) / 2;
+  return [
+    { x: PAGE_MARGIN,              width: colW },
+    { x: PAGE_MARGIN + colW + GUTTER, width: colW },
+  ];
+}
+
+/** X coordinate of the centre spine (used by the column-rule element) */
+export function spineX(vw: number): number {
+  const colW = (vw - PAGE_MARGIN * 2 - GUTTER) / 2;
+  return PAGE_MARGIN + colW + GUTTER / 2;
+}
+
+// ─── Per-column occlusion helper ───────────────────────────────────────────
+
+/**
+ * Given a column rect and a list of explosion-occlusion rects, returns the
+ * available { x, width } for a text line at `y` within that column.
+ *
+ * Strategy: find the largest unblocked horizontal run inside the column.
+ */
+function columnAvail(
   y: number,
-  lineHeight: number,
-  viewportWidth: number,
+  col: Column,
   obstacles: Rect[],
-): Array<{ x: number; width: number }> {
-  // Filter obstacles that overlap the Y band
-  const blocking = obstacles.filter(
-    o => o.x < viewportWidth && o.x + o.width > 0 && o.y < y + lineHeight && o.y + o.height > y,
+): { x: number; width: number } | null {
+  const colRight = col.x + col.width;
+
+  // Obstacles that overlap this Y row AND this column's X range
+  const blocking = obstacles.filter(o =>
+    o.y < y + LINE_HEIGHT && o.y + o.height > y &&
+    o.x < colRight         && o.x + o.width  > col.x,
   );
 
-  // Build merged X-intervals from overlapping obstacles
-  const intervals: Array<[number, number]> = blocking.map(
-    o => [Math.max(0, o.x), Math.min(viewportWidth, o.x + o.width)],
-  );
-  intervals.sort((a, b) => a[0] - b[0]);
+  if (blocking.length === 0) {
+    return { x: col.x, width: col.width };
+  }
 
-  const merged: Array<[number, number]> = [];
-  for (const [lo, hi] of intervals) {
+  // Convert to column-local [lo, hi] intervals
+  const ivs: [number, number][] = blocking
+    .map(o => [Math.max(0, o.x - col.x), Math.min(col.width, o.x + o.width - col.x)] as [number, number])
+    .filter(([lo, hi]) => lo < hi);
+
+  ivs.sort((a, b) => a[0] - b[0]);
+
+  // Merge overlapping intervals
+  const merged: [number, number][] = [];
+  for (const [lo, hi] of ivs) {
     if (merged.length && lo <= merged[merged.length - 1][1]) {
       merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], hi);
     } else {
@@ -98,141 +118,110 @@ function availableSegments(
     }
   }
 
-  // Gaps between merged intervals are where text can go
-  const segs: Array<{ x: number; width: number }> = [];
-  let cursor = 0;
+  // Collect gaps (unblocked segments)
+  const gaps: { x: number; width: number }[] = [];
+  let cur = 0;
   for (const [lo, hi] of merged) {
-    if (lo > cursor) segs.push({ x: cursor, width: lo - cursor });
-    cursor = hi;
+    if (lo > cur) gaps.push({ x: col.x + cur, width: lo - cur });
+    cur = hi;
   }
-  if (cursor < viewportWidth) segs.push({ x: cursor, width: viewportWidth - cursor });
+  if (cur < col.width) gaps.push({ x: col.x + cur, width: col.width - cur });
 
-  return segs.filter(s => s.width >= MIN_SEG_WIDTH);
+  if (gaps.length === 0) return null;
+  // Return the widest gap
+  return gaps.reduce((a, b) => b.width > a.width ? b : a);
 }
 
-// -----------------------------------------------------------------------
-// TextFlowEngine
-// -----------------------------------------------------------------------
+// ─── TextFlowEngine ────────────────────────────────────────────────────────
 
 export class TextFlowEngine {
   private container: HTMLElement;
   private spans: HTMLSpanElement[] = [];
   private prepared: PreparedTextWithSegments | null = null;
-
-  /** Skip a frame flag for 30fps throttling */
-  private skipFrame = false;
-
-  /** Cached line layout — only rebuild when dirty or obstacles change significantly */
   private linesDirty = true;
+  private firstSpanIdx = 0; // index of the first body-text span (after title span)
 
   constructor(container: HTMLElement) {
     this.container = container;
-    this._buildSpanPool();
+    this._buildPool();
   }
 
-  // -----------------------------------------------------------------------
-  // Public API
-  // -----------------------------------------------------------------------
+  // ── Public API ────────────────────────────────────────────────────────────
 
-  /** Call once (or when text changes) to re-prepare measurement data. */
   setText(text: string): void {
-    // prepareWithSegments is the expensive call (~5–20ms); do it off the hot path.
-    this.prepared = prepareWithSegments(text, TEXT_FONT);
-    this.linesDirty = true;
+    this.prepared    = prepareWithSegments(text, TEXT_FONT);
+    this.linesDirty  = true;
   }
 
   /**
-   * Called every animation frame.
+   * Main layout call — invoked every animation frame from main.ts.
    *
-   * obstacles — Rect[] in viewport (CSS pixel) coordinates describing areas
-   *             that text must avoid. Typically: the fireworks canvas rect +
-   *             the current particle-cluster bounding rect.
-   *
-   * viewportWidth / viewportHeight — current window dimensions.
+   * obstacles  : explosion occlusion rects in viewport-px coordinates
+   * vw / vh    : current window dimensions
    */
-  layout(
-    obstacles: Rect[],
-    viewportWidth: number,
-    viewportHeight: number,
-  ): void {
+  layout(obstacles: Rect[], vw: number, vh: number): void {
     if (!this.prepared) return;
 
-    // Throttle to ~30fps: skip every other frame unless text is dirty.
-    // Particle positions change fast, but at 30fps the reflow still looks live.
-    this.skipFrame = !this.skipFrame;
-    if (this.skipFrame && !this.linesDirty) return;
     this.linesDirty = false;
 
-    // -------------------------------------------------------------------
-    // Walk line slots top → bottom, asking pretext how much text fits in
-    // each available horizontal segment.
-    // -------------------------------------------------------------------
+    const columns = getColumns(vw);
+    const bottom  = vh - MARGIN_BOTTOM;
+
+    // Shared pretext cursor — advances through both columns in reading order
     let cursor: LayoutCursor = { segmentIndex: 0, graphemeIndex: 0 };
-    let spanIdx = 0;
-    let y = MARGIN_TOP;
-    const bottom = viewportHeight - MARGIN_BOTTOM;
+    let spanIdx = this.firstSpanIdx;
+    let textExhausted = false;
 
-    while (y < bottom && spanIdx < this.spans.length) {
-      const segs = availableSegments(y, LINE_HEIGHT, viewportWidth, obstacles);
+    for (const col of columns) {
+      if (textExhausted) break;
 
-      if (segs.length === 0) {
-        // Entire row is blocked — skip the row without advancing the text cursor.
-        y += LINE_HEIGHT;
-        continue;
+      let y = MARGIN_TOP;
+
+      while (y < bottom && spanIdx < this.spans.length) {
+        const avail = columnAvail(y, col, obstacles);
+
+        if (!avail || avail.width - H_PAD * 2 < MIN_COL_W) {
+          // Row blocked — skip row, do NOT advance the text cursor
+          y += LINE_HEIGHT;
+          continue;
+        }
+
+        // Ask pretext: how much text fits in this width?
+        const line = layoutNextLine(this.prepared, cursor, avail.width - H_PAD * 2);
+
+        if (!line) { textExhausted = true; break; }
+
+        const span = this.spans[spanIdx];
+        span.textContent = line.text;
+        span.style.left  = `${avail.x + H_PAD}px`;
+        span.style.top   = `${y}px`;
+        span.style.display = '';
+
+        cursor = line.end;
+        y      += LINE_HEIGHT;
+        spanIdx++;
       }
-
-      // Pick the widest available segment for this line.
-      const seg = segs.reduce((best, s) => (s.width > best.width ? s : best));
-      const usableWidth = seg.width - H_PAD * 2;
-
-      if (usableWidth < MIN_SEG_WIDTH) {
-        y += LINE_HEIGHT;
-        continue;
-      }
-
-      // Ask pretext: "starting at `cursor`, how much text fits in `usableWidth`?"
-      // This is pure arithmetic on cached segment widths — ~0.003ms per call.
-      const line = layoutNextLine(this.prepared, cursor, usableWidth);
-
-      if (!line) break; // All text has been placed.
-
-      // Update the pre-allocated span (no DOM allocation!)
-      const span = this.spans[spanIdx];
-      span.textContent = line.text;
-      span.style.left = `${seg.x + H_PAD}px`;
-      span.style.top = `${y}px`;
-      span.style.display = '';
-
-      // Advance pretext cursor to the start of the next line.
-      cursor = line.end;
-      y += LINE_HEIGHT;
-      spanIdx++;
     }
 
-    // Hide any leftover spans from the previous frame.
+    // Hide leftover spans from previous frame
     for (let i = spanIdx; i < this.spans.length; i++) {
       this.spans[i].style.display = 'none';
     }
   }
 
-  /** Force a layout rebuild on the next frame (e.g. after window resize). */
-  markDirty(): void {
-    this.linesDirty = true;
-  }
+  markDirty(): void { this.linesDirty = true; }
 
-  // -----------------------------------------------------------------------
-  // Private helpers
-  // -----------------------------------------------------------------------
+  // ── Private ───────────────────────────────────────────────────────────────
 
-  /** Pre-create MAX_SPANS spans and add them to the container (hidden). */
-  private _buildSpanPool(): void {
+  private _buildPool(): void {
     const frag = document.createDocumentFragment();
     for (let i = 0; i < MAX_SPANS; i++) {
-      const span = document.createElement('span');
-      span.style.display = 'none';
-      frag.appendChild(span);
-      this.spans.push(span);
+      const s = document.createElement('span');
+      s.style.display = 'none';
+      frag.appendChild(s);
+      this.spans.push(s);
     }
     this.container.appendChild(frag);
+    this.firstSpanIdx = 0;
   }
 }
